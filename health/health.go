@@ -151,3 +151,41 @@ func (t *Tracker) prune() {
 	}
 	t.failures = keep
 }
+
+// TrackerState 是 Tracker 的可序列化运行状态快照，
+// 用于运行状态快照与恢复。字段全部为值类型，可安全深拷贝。
+type TrackerState struct {
+	State      State       // 当前健康状态
+	Failures   []time.Time // 统计窗口内的失败时刻
+	IsolatedAt time.Time   // 进入隔离的时刻（未隔离为零值）
+	SuccessRun int         // 连续成功计数（恢复进度）
+}
+
+// Export 导出当前状态快照（深拷贝失败时刻切片，
+// 之后原 Tracker 的推进不会影响已导出的快照）。
+// 不触发时间推进：状态机按时间惰性推进，isolatedAt 等时刻
+// 被原样保留，恢复后的 Tracker 在下次访问时推进结果一致。
+func (t *Tracker) Export() TrackerState {
+	st := TrackerState{
+		State:      t.state,
+		IsolatedAt: t.isolatedAt,
+		SuccessRun: t.successRun,
+	}
+	if len(t.failures) > 0 {
+		st.Failures = append([]time.Time(nil), t.failures...)
+	}
+	return st
+}
+
+// NewTrackerWithState 从快照恢复一个 Tracker；
+// 之后的状态推进与从原 Tracker 继续运行一致。
+func NewTrackerWithState(pol Policy, now func() time.Time, st TrackerState) *Tracker {
+	tr := NewTracker(pol, now)
+	tr.state = st.State
+	tr.isolatedAt = st.IsolatedAt
+	tr.successRun = st.SuccessRun
+	if len(st.Failures) > 0 {
+		tr.failures = append([]time.Time(nil), st.Failures...)
+	}
+	return tr
+}
