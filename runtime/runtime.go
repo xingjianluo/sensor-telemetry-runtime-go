@@ -52,6 +52,14 @@ type Runtime struct {
 	// acceptedMaxSeq 记录每台设备已纳入输出的最大序号，
 	// 供校准配置兼容性校验使用。
 	acceptedMaxSeq map[string]uint64
+	// sessions 为全部进行中会话的注册表（含其绑定的校准快照），
+	// 快照/恢复据此让进程重启前已开始的会话延续同一校准版本。
+	sessions map[uint64]*Session
+	// nextSessionID 是单调递增的会话 ID 发号器（跨恢复延续）。
+	nextSessionID uint64
+	// calibHistory 留存曾被任何会话绑定过的校准配置（配置不可变，
+	// 保存引用即可），恢复后旧会话仍按原版本归一化。
+	calibHistory map[uint64]*calibration.Config
 }
 
 // New 创建运行时。window 为乱序重排窗口大小（>=1）。
@@ -64,21 +72,46 @@ func NewWithClock(calib *calibration.Store, policy health.Policy, window int, no
 	if window < 1 {
 		window = 1
 	}
-	return &Runtime{
+	r := &Runtime{
 		calib:          calib,
 		policy:         policy,
 		window:         window,
 		now:            now,
 		devices:        make(map[string]*deviceState),
 		acceptedMaxSeq: make(map[string]uint64),
+		sessions:       make(map[uint64]*Session),
+		nextSessionID:  1,
+		calibHistory:   make(map[uint64]*calibration.Config),
 	}
+	if cur := calib.Snapshot(); cur != nil {
+		r.calibHistory[cur.Version] = cur
+	}
+	return r
 }
 
 // NewSession 创建绑定当前校准快照的会话。
 // 会话内的所有判定均使用该快照，结论可复现；
 // 之后对 Store 的更新不影响已存在的会话。
+// 会话在注册表中获得一个运行时内唯一、跨恢复延续的 ID。
 func (r *Runtime) NewSession() *Session {
-	return &Session{rt: r, cfg: r.calib.Snapshot()}
+	cfg := r.calib.Snapshot()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id := r.nextSessionID
+	r.nextSessionID++
+	r.calibHistory[cfg.Version] = cfg
+	s := &Session{id: id, rt: r, cfg: cfg}
+	r.sessions[id] = s
+	return s
+}
+
+// OpenSession 按 ID 打开会话：用于从快照恢复后继续使用重启前
+// 已开始的会话。该会话仍绑定其原校准版本；不存在时返回 nil。
+// 注意：调用方不得并发使用同一个 Session。
+func (r *Runtime) OpenSession(id uint64) *Session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sessions[id]
 }
 
 // AcceptedMaxSeq 返回每台设备已纳入输出的最大序号快照。
@@ -104,9 +137,13 @@ func (r *Runtime) DeviceState(deviceID string) health.State {
 
 // Session 是绑定固定校准快照的会话。
 type Session struct {
+	id  uint64
 	rt  *Runtime
 	cfg *calibration.Config
 }
+
+// ID 返回会话的唯一标识（跨恢复延续，供 OpenSession 重新打开）。
+func (s *Session) ID() uint64 { return s.id }
 
 // CalibVersion 返回会话绑定的校准版本。
 func (s *Session) CalibVersion() uint64 { return s.cfg.Version }

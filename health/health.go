@@ -78,6 +78,41 @@ func NewTracker(pol Policy, now func() time.Time) *Tracker {
 	return &Tracker{pol: pol, now: now, state: Healthy}
 }
 
+// RestoreTracker 从快照字段重建跟踪器，使故障隔离与恢复进度跨重启延续。
+//
+// 参数语义与 Tracker 内部字段一一对应：
+//   - state：冻结时的健康状态（调用方须保证在合法枚举范围内）；
+//   - failures：统计窗口内的失败时刻（拷贝后使用，不持有入参切片）；
+//   - isolatedAt：本次隔离的起始时刻（仅 state==Isolated 时有意义）；
+//   - successRun：Suspect/Recovering 下已累计的连续成功次数。
+//
+// 重建后的状态机会立刻按 now 推进（例如隔离静默期已过则进入
+// Recovering），与“从未重启、时钟一直连续走动”的行为一致。
+// now 为 nil 时使用真实时钟；长时间无人值守场景下，墙钟单调时
+// 隔离/恢复计时自然延续。
+func RestoreTracker(pol Policy, now func() time.Time, state State, failures []time.Time, isolatedAt time.Time, successRun int) *Tracker {
+	if now == nil {
+		now = time.Now
+	}
+	t := &Tracker{
+		pol:        pol,
+		now:        now,
+		state:      state,
+		isolatedAt: isolatedAt,
+		successRun: successRun,
+	}
+	t.failures = append(t.failures, failures...)
+	return t
+}
+
+// StateAndProgress 返回重建快照所需的全部字段（供运行时冻结状态使用）。
+func (t *Tracker) StateAndProgress() (state State, failures []time.Time, isolatedAt time.Time, successRun int) {
+	t.advance()
+	fs := make([]time.Time, len(t.failures))
+	copy(fs, t.failures)
+	return t.state, fs, t.isolatedAt, t.successRun
+}
+
 // State 返回当前状态（会按时间推进 Isolated -> Recovering）。
 func (t *Tracker) State() State {
 	t.advance()

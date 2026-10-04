@@ -94,3 +94,32 @@ func TestSingleDisconnectIsTransient(t *testing.T) {
 		t.Fatalf("state=%s, want Healthy after reconnect", tr.State())
 	}
 }
+
+func TestRestoreTrackerContinuesProgress(t *testing.T) {
+	pol := DefaultPolicy()
+	clk := &fakeClock{t: time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)}
+
+	// 模拟快照前一刻：Recovering，且已累计 1 次成功（还需 1 次即恢复）。
+	tr := RestoreTracker(pol, clk.now, Recovering, nil, clk.t, 1)
+	t.Logf("restored: state=%s successRun=1 (need %d to recover)", tr.State(), pol.RecoverAfter)
+	if tr.State() != Recovering {
+		t.Fatalf("state=%s, want Recovering after restore", tr.State())
+	}
+	tr.RecordSuccess()
+	if tr.State() != Healthy {
+		t.Fatalf("state=%s, want Healthy after one more success", tr.State())
+	}
+	t.Logf("after 1 more success -> Healthy, recovery progress carried across restore")
+
+	// 隔离状态也要延续：静默期未过仍被拒绝接纳。
+	clk2 := &fakeClock{t: time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)}
+	iso := RestoreTracker(pol, clk2.now, Isolated, nil, clk2.t, 0)
+	if iso.Accepting() {
+		t.Fatal("restored Isolated tracker unexpectedly accepting")
+	}
+	clk2.advance(pol.Quarantine + time.Second)
+	if iso.State() != Recovering {
+		t.Fatalf("state=%s, quarantine timer did not continue after restore", iso.State())
+	}
+	t.Logf("isolation quarantine continued across restore -> Recovering")
+}
